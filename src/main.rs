@@ -2,27 +2,31 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
 use zip::read::ZipArchive;
 
 use eframe::egui;
 use rfd::FileDialog;
 
-/// Specify whether the input is a file or a directory.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 enum InputType {
     File,
     Directory,
 }
 
-/// The application state for our GUI.
 struct MyApp {
     input_path: String,
-    /// Comma‑separated list of file extensions (e.g., "pdf, jpg, png")
+    /// Comma-separated list of file extensions (e.g., "pdf, jpg, png")
     extensions: String,
     output_path: String,
     input_type: InputType,
     log: String,
+    /// Receiver for log messages coming from the background extraction thread.
+    log_rx: Option<mpsc::Receiver<String>>,
+    /// Flag indicating if extraction is running.
+    is_extracting: bool,
 }
 
 impl Default for MyApp {
@@ -33,74 +37,76 @@ impl Default for MyApp {
             output_path: String::new(),
             input_type: InputType::File,
             log: String::new(),
+            log_rx: None,
+            is_extracting: false,
         }
     }
 }
 
-impl MyApp {
-    /// Extract files with the specified extensions from the zip file(s)
-    /// in `input_path` into `output_path`. Progress messages are appended
-    /// to `self.log`.
-    fn extract_files(&mut self) -> Result<(), Box<dyn Error>> {
-        let input_path = PathBuf::from(&self.input_path);
-        let output_path = PathBuf::from(&self.output_path);
-        fs::create_dir_all(&output_path)?;
-
-        // Split the extensions field by comma, trimming whitespace and removing any leading dot.
-        let filter_exts: Vec<String> = self
-            .extensions
-            .split(',')
-            .map(|s| s.trim().trim_start_matches('.').to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if filter_exts.is_empty() {
-            return Err("No valid file extensions provided.".into());
-        }
-
-        if self.input_type == InputType::Directory {
-            if !input_path.is_dir() {
-                return Err(format!("{} is not a valid directory.", input_path.display()).into());
-            }
-            for entry in fs::read_dir(&input_path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file()
-                    && path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.eq_ignore_ascii_case("zip"))
-                        .unwrap_or(false)
-                {
-                    self.log
-                        .push_str(&format!("Processing zip file: {}\n", path.display()));
-                    process_zip_file(&path, &filter_exts, &output_path, &mut self.log)?;
-                }
-            }
-        } else {
-            if !input_path.is_file() {
-                return Err(format!("{} is not a valid file.", input_path.display()).into());
-            }
-            self.log
-                .push_str(&format!("Processing zip file: {}\n", input_path.display()));
-            process_zip_file(&input_path, &filter_exts, &output_path, &mut self.log)?;
-        }
-        Ok(())
+/// This function runs in a background thread. It performs the extraction work
+/// and sends progress messages back through the provided channel.
+fn extract_files_thread(
+    input_path: String,
+    output_path: String,
+    extensions: String,
+    input_type: InputType,
+    sender: mpsc::Sender<String>,
+) -> Result<(), Box<dyn Error>> {
+    let output_path = PathBuf::from(&output_path);
+    fs::create_dir_all(&output_path)?;
+    let filter_exts: Vec<String> = extensions
+        .split(',')
+        .map(|s| s.trim().trim_start_matches('.').to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if filter_exts.is_empty() {
+        let _ = sender.send("No valid file extensions provided.\n".to_string());
+        return Err("No valid file extensions provided.".into());
     }
+    let input_path = PathBuf::from(&input_path);
+    if input_type == InputType::Directory {
+        if !input_path.is_dir() {
+            let _ = sender.send(format!("{} is not a valid directory.\n", input_path.display()));
+            return Err(format!("{} is not a valid directory.", input_path.display()).into());
+        }
+        for entry in fs::read_dir(&input_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("zip"))
+                    .unwrap_or(false)
+            {
+                let _ = sender.send(format!("Processing zip file: {}\n", path.display()));
+                process_zip_file_thread(&path, &filter_exts, &output_path, &sender)?;
+            }
+        }
+    } else {
+        if !input_path.is_file() {
+            let _ = sender.send(format!("{} is not a valid file.\n", input_path.display()));
+            return Err(format!("{} is not a valid file.", input_path.display()).into());
+        }
+        let _ = sender.send(format!("Processing zip file: {}\n", input_path.display()));
+        process_zip_file_thread(&input_path, &filter_exts, &output_path, &sender)?;
+    }
+    let _ = sender.send("Extraction completed successfully.\n".to_string());
+    Ok(())
 }
 
-/// Process a single zip file by extracting files that have an extension in `exts`.
+/// Processes a single zip file by extracting files whose extensions are in `exts`.
+/// Progress messages are sent via the provided sender.
 /// Files whose names include "__MACOSX" are skipped.
 /// The files are saved into `output_dir` using their original file names.
-fn process_zip_file(
+fn process_zip_file_thread(
     zip_path: &Path,
     exts: &Vec<String>,
     output_dir: &Path,
-    log: &mut String,
+    sender: &mpsc::Sender<String>,
 ) -> Result<(), Box<dyn Error>> {
     let file = File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
-
     for i in 0..archive.len() {
         let mut zip_file = archive.by_index(i)?;
         let entry_name = zip_file.name();
@@ -120,12 +126,9 @@ fn process_zip_file(
                         let output_file_path = output_dir.join(file_name);
                         let mut outfile = File::create(&output_file_path)?;
                         io::copy(&mut zip_file, &mut outfile)?;
-                        log.push_str(&format!(
-                            "Extracted: {}\n",
-                            output_file_path.display()
-                        ));
+                        let _ = sender.send(format!("Extracted: {}\n", output_file_path.display()));
                     } else {
-                        log.push_str(&format!(
+                        let _ = sender.send(format!(
                             "Warning: Skipping entry with invalid file name: {}\n",
                             entry_name
                         ));
@@ -137,9 +140,23 @@ fn process_zip_file(
     Ok(())
 }
 
-/// Implement the GUI application using eframe/egui.
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drain any log messages coming from the background thread.
+        if let Some(rx) = &self.log_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => self.log.push_str(&msg),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.is_extracting = false;
+                        self.log_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Zip File Extractor");
 
@@ -184,19 +201,27 @@ impl eframe::App for MyApp {
             });
 
             // Button to start extraction.
-            if ui.button("Extract Files").clicked() {
-                match self.extract_files() {
-                    Ok(_) => self.log.push_str("Extraction completed successfully.\n"),
-                    Err(e) => self.log.push_str(&format!("Error: {}\n", e)),
-                }
+            if ui.button("Extract Files").clicked() && !self.is_extracting {
+                // Clear the previous log and start extraction in a new thread.
+                self.log.clear();
+                let input_path = self.input_path.clone();
+                let output_path = self.output_path.clone();
+                let extensions = self.extensions.clone();
+                let input_type = self.input_type;
+                let (tx, rx) = mpsc::channel::<String>();
+                self.log_rx = Some(rx);
+                self.is_extracting = true;
+                thread::spawn(move || {
+                    let _ = extract_files_thread(input_path, output_path, extensions, input_type, tx);
+                });
             }
 
             ui.separator();
 
-            // Log output wrapped in a ScrollArea
+            // Log output in a scrollable area.
             ui.label("Log:");
             egui::ScrollArea::vertical()
-                .max_height(300.0) // This limits the height; adjust as needed
+                .max_height(300.0)
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.log)
@@ -207,7 +232,6 @@ impl eframe::App for MyApp {
         });
     }
 }
-
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
