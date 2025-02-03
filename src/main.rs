@@ -222,6 +222,7 @@ impl eframe::App for MyApp {
             ui.label("Log:");
             egui::ScrollArea::vertical()
                 .max_height(300.0)
+                .stick_to_bottom(true)
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.log)
