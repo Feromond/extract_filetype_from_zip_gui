@@ -193,15 +193,21 @@ impl eframe::App for MyApp {
 
             ui.separator();
 
+            // Log output wrapped in a ScrollArea
             ui.label("Log:");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.log)
-                    .desired_rows(20)
-                    .desired_width(600.0),
-            );
+            egui::ScrollArea::vertical()
+                .max_height(300.0) // This limits the height; adjust as needed
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.log)
+                            .desired_rows(20)
+                            .desired_width(600.0),
+                    );
+                });
         });
     }
 }
+
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
