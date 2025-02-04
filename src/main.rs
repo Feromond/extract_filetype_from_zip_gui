@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
+use std::sync::Arc;
 use zip::read::ZipArchive;
 
 use eframe::egui;
+use eframe::egui::IconData;
 use rfd::FileDialog;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -252,8 +254,32 @@ impl eframe::App for MyApp {
     }
 }
 
-fn main() { 
-    let native_options = eframe::NativeOptions::default();
+fn main() {
+    let icon_path = Path::new("icon.ico");
+
+    let icon_data = if icon_path.exists() {
+        let image = image::open(icon_path)
+            .expect("Failed to open icon.ico")
+            .to_rgba8();
+        let (width, height) = image.dimensions();
+        IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
+        }
+    } else {
+        // Fallback: use a transparent 32x32 icon.
+        IconData {
+            rgba: vec![0; 32 * 32 * 4],
+            width: 32,
+            height: 32,
+        }
+    };
+
+    let mut native_options = eframe::NativeOptions::default();
+    // Set the icon via the viewport's icon field.
+    native_options.viewport.icon = Some(Arc::new(icon_data));
+
     let _ = eframe::run_native(
         "Zip File Extractor",
         native_options,
