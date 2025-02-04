@@ -20,7 +20,8 @@ enum InputType {
 
 struct MyApp {
     input_path: String,
-    /// Comma-separated list of file extensions (e.g., "pdf, jpg, png")
+    /// Comma-separated list of file extensions (e.g., "pdf, jpg, png").
+    /// If left empty, all files will be extracted.
     extensions: String,
     output_path: String,
     input_type: InputType,
@@ -56,15 +57,20 @@ fn extract_files_thread(
 ) -> Result<(), Box<dyn Error>> {
     let output_path = PathBuf::from(&output_path);
     fs::create_dir_all(&output_path)?;
+
+    // Split the extensions string into a vector.
+    // If the field is left empty, the vector will be empty.
     let filter_exts: Vec<String> = extensions
         .split(',')
         .map(|s| s.trim().trim_start_matches('.').to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
+
+    // Log a message if no filtering is desired.
     if filter_exts.is_empty() {
-        let _ = sender.send("No valid file extensions provided.\n".to_string());
-        return Err("No valid file extensions provided.".into());
+        let _ = sender.send("No file extensions provided, extracting all files.\n".to_string());
     }
+
     let input_path = PathBuf::from(&input_path);
     if input_type == InputType::Directory {
         if !input_path.is_dir() {
@@ -97,10 +103,11 @@ fn extract_files_thread(
     Ok(())
 }
 
-/// Processes a single zip file by extracting files whose extensions are in `exts`.
-/// Progress messages are sent via the provided sender.
+/// Processes a single zip file by extracting files.
+/// If `exts` is empty, every file is extracted;
+/// otherwise, only files whose extension (in lowercase) is in `exts` are extracted.
 /// Files whose names include "__MACOSX" are skipped.
-/// The files are saved into `output_dir` using their original file names.
+/// Extracted files are saved into `output_dir` using their original file names.
 fn process_zip_file_thread(
     zip_path: &Path,
     exts: &Vec<String>,
@@ -118,23 +125,32 @@ fn process_zip_file_thread(
             continue;
         }
 
-        // Only process file entries.
+        // Process only file entries.
         if zip_file.is_file() {
             let entry_path = Path::new(entry_name);
-            if let Some(entry_ext) = entry_path.extension().and_then(|s| s.to_str()) {
-                let entry_ext = entry_ext.to_lowercase();
-                if exts.contains(&entry_ext) {
-                    if let Some(file_name) = entry_path.file_name() {
-                        let output_file_path = output_dir.join(file_name);
-                        let mut outfile = File::create(&output_file_path)?;
-                        io::copy(&mut zip_file, &mut outfile)?;
-                        let _ = sender.send(format!("Extracted: {}\n", output_file_path.display()));
-                    } else {
-                        let _ = sender.send(format!(
-                            "Warning: Skipping entry with invalid file name: {}\n",
-                            entry_name
-                        ));
-                    }
+
+            // Decide whether to extract this file:
+            // - If no extensions were specified, extract every file.
+            // - Otherwise, extract only files with an extension in `exts`.
+            let should_extract = if exts.is_empty() {
+                true
+            } else if let Some(entry_ext) = entry_path.extension().and_then(|s| s.to_str()) {
+                exts.contains(&entry_ext.to_lowercase())
+            } else {
+                false
+            };
+
+            if should_extract {
+                if let Some(file_name) = entry_path.file_name() {
+                    let output_file_path = output_dir.join(file_name);
+                    let mut outfile = File::create(&output_file_path)?;
+                    io::copy(&mut zip_file, &mut outfile)?;
+                    let _ = sender.send(format!("Extracted: {}\n", output_file_path.display()));
+                } else {
+                    let _ = sender.send(format!(
+                        "Warning: Skipping entry with invalid file name: {}\n",
+                        entry_name
+                    ));
                 }
             }
         }
@@ -187,7 +203,7 @@ impl eframe::App for MyApp {
 
             // Extensions field.
             ui.horizontal(|ui| {
-                ui.label("Extensions (comma-separated, e.g., pdf, jpg, png):");
+                ui.label("Extensions (comma-separated, e.g., pdf, jpg, png, if blank then all):");
                 ui.text_edit_singleline(&mut self.extensions);
             });
 
@@ -236,7 +252,7 @@ impl eframe::App for MyApp {
     }
 }
 
-fn main() {
+fn main() { 
     let native_options = eframe::NativeOptions::default();
     let _ = eframe::run_native(
         "Zip File Extractor",
