@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.23"
-egui = "0.23"
-rfd = "0.10"
-zip = "0.6"
+eframe = "0.30.0"
+egui = "0.30.0"
+rfd = "0.15.2"
+zip = "2.2.2"
 
 [dependencies.winapi]
 version = "0.3.9"

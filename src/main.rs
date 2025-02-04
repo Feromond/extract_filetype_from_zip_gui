@@ -239,6 +239,6 @@ fn main() {
     let _ = eframe::run_native(
         "Zip File Extractor",
         native_options,
-        Box::new(|_cc| Box::new(MyApp::default())),
+        Box::new(|_cc| Ok(Box::new(MyApp::default()))),
     );
 }
